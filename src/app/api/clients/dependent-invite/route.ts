@@ -20,7 +20,7 @@ export async function GET(request: Request) {
   if (token.length < 32 || token.length > 100) return NextResponse.json({ error: 'Convite inválido' }, { status: 400 });
   const supabase = createSupabaseAdmin();
   const { data: invite } = await supabase.from('dependent_registration_invites')
-    .select('client_id, expires_at, used_at, clients(full_name, cpf, phone)')
+    .select('client_id, expires_at, used_at, clients!dependent_registration_invites_client_id_fkey(full_name, cpf, phone)')
     .eq('token_hash', hashToken(token)).maybeSingle();
   if (!invite || invite.used_at || new Date(invite.expires_at) <= new Date()) {
     return NextResponse.json({ error: 'Convite inválido ou expirado' }, { status: 410 });
@@ -55,7 +55,7 @@ export async function POST(request: Request) {
 
   const supabase = createSupabaseAdmin();
   const { data: invite } = await supabase.from('dependent_registration_invites')
-    .select('id, client_id, expires_at, used_at, clients(cpf)')
+    .select('id, client_id, expires_at, used_at, clients!dependent_registration_invites_client_id_fkey(cpf)')
     .eq('token_hash', hashToken(token)).maybeSingle();
   if (!invite || invite.used_at || new Date(invite.expires_at) <= new Date()) {
     return NextResponse.json({ error: 'Convite inválido ou expirado' }, { status: 410 });

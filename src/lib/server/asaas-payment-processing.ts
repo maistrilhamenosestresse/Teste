@@ -108,7 +108,7 @@ async function processTrailPayment(supabase: SupabaseAdmin, reservationIds: stri
   if (!processed) return 'duplicate';
 
   const { data: reservations, error: reservationError } = await supabase.from('reservas')
-    .select('*, clients(*), agendas(*)').in('id', reservationIds);
+    .select('*, clients!reservas_client_id_fkey(*), agendas(*)').in('id', reservationIds);
   if (reservationError) throw reservationError;
   const principal = reservations?.find((item: any) => item.clients?.email) || reservations?.[0];
   if (!principal?.clients || !principal?.agendas) return 'completed';

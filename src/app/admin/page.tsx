@@ -33,6 +33,15 @@ type AgendaForm = {
 type ChatMessage = { sender: 'user' | 'bot'; text: string; };
 
 const formatCurrency = (val: number | string) => Number(val).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+const csvCell = (value: unknown) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+
+const formatPaymentMethod = (method?: string) => {
+  if (method === 'CREDIT_CARD') return 'Cartão';
+  if (method === 'BOLETO') return 'Boleto';
+  if (method === 'PIX') return 'Pix';
+  if (method === 'ASAAS') return 'Asaas';
+  return method || 'Não informado';
+};
 
 export default function AdminPage() {
   const { register, handleSubmit, reset, watch, setValue, getValues } = useForm<AgendaForm>({
@@ -125,6 +134,7 @@ export default function AdminPage() {
   const [reservaFilter, setReservaFilter] = useState<'ALL' | 'pago' | 'pendente' | 'atrasado'>('ALL');
   const [custos, setCustos] = useState<any[]>([]);
   const [isFetchingDetails, setIsFetchingDetails] = useState(false);
+  const [detailsError, setDetailsError] = useState('');
   const [financasTab, setFinancasTab] = useState<'asaas' | 'receitas' | 'despesas' | 'relatorios'>('asaas');
   const [expandedReportId, setExpandedReportId] = useState<string | null>(null);
   const [allReservas, setAllReservas] = useState<any[]>([]);
@@ -176,9 +186,18 @@ export default function AdminPage() {
     let csvContent = "data:text/csv;charset=utf-8,";
     
     if (type === 'reservas') {
-      csvContent += "Nome,CPF,Telefone,Status de Pagamento,Valor Pago\n";
+      csvContent += "Nome,CPF,Telefone,Status de Pagamento,Valor Pago,Forma de Pagamento,Data da Compra,Referência\n";
       reservas.forEach(r => {
-        const row = `${r.clients?.full_name},${r.clients?.cpf},${r.clients?.phone},${r.status_pagamento.toUpperCase()},${r.valor_pago || 0}`;
+        const row = [
+          r.clients?.full_name,
+          r.clients?.cpf,
+          r.clients?.phone,
+          r.status_pagamento?.toUpperCase(),
+          Number(r.valor_pago || 0).toFixed(2),
+          formatPaymentMethod(r.metodo_pagamento),
+          r.created_at ? new Date(r.created_at).toLocaleString('pt-BR') : '',
+          r.nsu_transacao || '',
+        ].map(csvCell).join(',');
         csvContent += row + "\n";
       });
     } else if (type === 'relatorios') {
@@ -384,7 +403,7 @@ export default function AdminPage() {
     try {
       const { data, error } = await supabase
         .from('reservas')
-        .select('*, clients(*), agendas(*)')
+        .select('*, clients!reservas_client_id_fkey(*), agendas(*)')
         .eq('id', notif.reserva_id)
         .single();
         
@@ -534,15 +553,21 @@ export default function AdminPage() {
     if (!selectedAgendaId) return;
     const fetchDetails = async () => {
       setIsFetchingDetails(true);
+      setDetailsError('');
+      setReservas([]);
+      setCustos([]);
       try {
         const [resReservas, resCustos] = await Promise.all([
-          supabase.from('reservas').select('*, clients(*)').eq('agenda_id', selectedAgendaId),
+          supabase.from('reservas').select('*, clients!reservas_client_id_fkey(*)').eq('agenda_id', selectedAgendaId).order('created_at', { ascending: false }),
           supabase.from('trilha_custos').select('*').eq('agenda_id', selectedAgendaId).order('created_at', { ascending: true })
         ]);
+        if (resReservas.error) throw resReservas.error;
+        if (resCustos.error) throw resCustos.error;
         setReservas(resReservas.data || []);
         setCustos(resCustos.data || []);
       } catch (e) {
         console.error("Erro ao buscar detalhes financeiros/reservas:", e);
+        setDetailsError('Não foi possível carregar as compras e os dados financeiros desta trilha. Tente novamente.');
       } finally {
         setIsFetchingDetails(false);
       }
@@ -556,7 +581,7 @@ export default function AdminPage() {
         setIsFetchingGlobalFinances(true);
         try {
           const [resReservas, resCustos] = await Promise.all([
-            supabase.from('reservas').select('id, agenda_id, status_pagamento, valor_pago, metodo_pagamento, client_id, clients(full_name, phone, photo_url, birth_date), agendas(date)'),
+            supabase.from('reservas').select('id, agenda_id, status_pagamento, valor_pago, metodo_pagamento, client_id, clients!reservas_client_id_fkey(full_name, phone, photo_url, birth_date), agendas(date)'),
             supabase.from('trilha_custos').select('agenda_id, valor_custo')
           ]);
           setAllReservas(resReservas.data || []);
@@ -605,7 +630,7 @@ export default function AdminPage() {
     try {
       const { data, error } = await supabase.from('reservas').insert([
         { agenda_id: selectedAgendaId, client_id: novaReservaClientId, status_pagamento: novaReservaStatus, valor_pago: Number(novaReservaValorPago.replace(',', '.')) || 0 }
-      ]).select('*, clients(*)').single();
+      ]).select('*, clients!reservas_client_id_fkey(*)').single();
       
       if (error) throw error;
       setReservas([...reservas, data]);
@@ -639,6 +664,8 @@ export default function AdminPage() {
 
   const selectedAgendaData = agendas.find(a => a.id === selectedAgendaId);
   const totalRevenue = reservas.filter(r => r.status_pagamento === 'pago').reduce((acc, curr) => acc + Number(curr.valor_pago || 0), 0);
+  const paidReservations = reservas.filter(r => r.status_pagamento === 'pago');
+  const paidReservationsWithoutValue = paidReservations.filter(r => Number(r.valor_pago || 0) <= 0);
   const totalCosts = custos.reduce((acc, curr) => acc + Number(curr.valor_custo), 0);
   const netProfit = totalRevenue - totalCosts;
   const profitMargin = totalRevenue > 0 ? ((netProfit / totalRevenue) * 100).toFixed(1) : "0.0";
@@ -1675,8 +1702,41 @@ export default function AdminPage() {
 
                 {isFetchingDetails ? (
                   <div className="flex justify-center py-10"><Loader2 className="h-8 w-8 animate-spin text-[#F17B37]" /></div>
+                ) : detailsError ? (
+                  <div className="bg-red-50 border border-red-200 rounded-2xl p-5 text-red-700 flex items-start gap-3">
+                    <AlertCircle className="h-5 w-5 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-bold">Falha ao carregar compras</p>
+                      <p className="text-sm mt-1">{detailsError}</p>
+                    </div>
+                  </div>
                 ) : (
                   <>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div className="bg-green-50 border border-green-100 rounded-2xl p-4">
+                        <p className="text-[10px] font-black text-green-700 uppercase tracking-wider">Faturamento registrado</p>
+                        <p className="text-2xl font-black text-green-800 mt-1">{formatCurrency(totalRevenue)}</p>
+                      </div>
+                      <div className="bg-blue-50 border border-blue-100 rounded-2xl p-4">
+                        <p className="text-[10px] font-black text-blue-700 uppercase tracking-wider">Compras pagas</p>
+                        <p className="text-2xl font-black text-blue-800 mt-1">{paidReservations.length}</p>
+                      </div>
+                      <div className={`${paidReservationsWithoutValue.length > 0 ? 'bg-amber-50 border-amber-200' : 'bg-gray-50 border-gray-100'} border rounded-2xl p-4`}>
+                        <p className={`text-[10px] font-black uppercase tracking-wider ${paidReservationsWithoutValue.length > 0 ? 'text-amber-700' : 'text-gray-500'}`}>Pagas sem valor</p>
+                        <p className={`text-2xl font-black mt-1 ${paidReservationsWithoutValue.length > 0 ? 'text-amber-800' : 'text-gray-700'}`}>{paidReservationsWithoutValue.length}</p>
+                      </div>
+                    </div>
+
+                    {paidReservationsWithoutValue.length > 0 && (
+                      <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-amber-800 flex items-start gap-3">
+                        <AlertCircle className="h-5 w-5 shrink-0 mt-0.5" />
+                        <p className="text-sm">
+                          Existem {paidReservationsWithoutValue.length} compras antigas marcadas como pagas sem valor registrado.
+                          Elas não entram no faturamento para evitar apresentar receita incorreta.
+                        </p>
+                      </div>
+                    )}
+
                     {/* Lista de Passageiros */}
                     <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
                     <div className="bg-[#1D2A3A] p-4 flex flex-col md:flex-row justify-between items-start md:items-center text-white gap-4">
@@ -1712,19 +1772,44 @@ export default function AdminPage() {
                           <p className="text-center text-gray-400 py-6 text-sm font-medium">Nenhum passageiro {reservaFilter !== 'ALL' ? 'neste status' : 'nesta trilha ainda'}.</p>
                         ) : (
                           reservas.filter(r => reservaFilter === 'ALL' || r.status_pagamento === reservaFilter).map(reserva => (
-                            <div key={reserva.id} className="flex items-center justify-between p-3 border border-gray-100 rounded-xl hover:bg-gray-50">
-                              <div>
+                            <div key={reserva.id} className="flex items-start justify-between gap-3 p-3 border border-gray-100 rounded-xl hover:bg-gray-50">
+                              <div className="min-w-0 flex-1">
                                 <p className="font-bold text-gray-800 text-sm">{reserva.clients?.full_name}</p>
-                                <div className="flex items-center gap-2 mt-1">
+                                <div className="flex items-center gap-2 mt-1 flex-wrap">
                                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${reserva.status_pagamento === 'pago' ? 'bg-green-100 text-green-700' : reserva.status_pagamento === 'atrasado' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'}`}>
                                     {reserva.status_pagamento.toUpperCase()}
                                   </span>
-                                  <span className="text-[10px] font-bold text-gray-400 bg-gray-100 px-2 py-0.5 rounded-md">
-                                    {Number(reserva.valor_pago || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
+                                  <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-md">
+                                    {formatPaymentMethod(reserva.metodo_pagamento)}
                                   </span>
+                                  {reserva.created_at && (
+                                    <span className="text-[10px] font-medium text-gray-500">
+                                      {new Date(reserva.created_at).toLocaleString('pt-BR')}
+                                    </span>
+                                  )}
                                 </div>
+                                {reserva.nsu_transacao && !String(reserva.nsu_transacao).startsWith('CREATING:') && (
+                                  <p className="text-[10px] text-gray-400 mt-1 truncate" title={reserva.nsu_transacao}>
+                                    Referência: {reserva.nsu_transacao}
+                                  </p>
+                                )}
                               </div>
-                              <div className="flex items-center gap-1">
+                              <div className="flex items-center gap-2 shrink-0">
+                                <div className="text-right">
+                                  {Number(reserva.valor_pago || 0) > 0 ? (
+                                    <>
+                                      <p className="text-[10px] font-bold text-gray-400 uppercase">Valor pago</p>
+                                      <p className="text-sm font-black text-green-700">{formatCurrency(reserva.valor_pago)}</p>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <p className="text-[10px] font-black text-amber-700">Valor não registrado</p>
+                                      {selectedAgendaData?.price && (
+                                        <p className="text-[10px] text-gray-500">Preço previsto: {formatCurrency(selectedAgendaData.price)}</p>
+                                      )}
+                                    </>
+                                  )}
+                                </div>
                                 <button 
                                   title="Alternar Status de Pagamento"
                                   onClick={() => handleToggleStatusPagamento(reserva.id, reserva.status_pagamento)} 
